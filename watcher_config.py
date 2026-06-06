@@ -6,78 +6,63 @@ import logging
 import os
 import sys
 import threading
-import time
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Callable
-
-APP_NAME = "TBHWatcher"
-CONFIG_FILENAME = "TBHWatcher_config.json"
-LOG_FILENAME = "TBHWatcher.log"
-LOCK_FILENAME = "TBHWatcher.lock"
-
-LOG_MAX_BYTES = 1024 * 1024
-LOG_BACKUP_COUNT = 3
-
-SINGLE_INSTANCE_MUTEX_NAME = "Global\\TBHWatcher_SingleInstance_Mutex"
-ERROR_ALREADY_EXISTS = 183
-
-WM_NULL = 0x0000
-WM_CLOSE = 0x0010
-SW_HIDE = 0
-SW_RESTORE = 9
-GW_OWNER = 4
-GWL_STYLE = -16
-GWL_EXSTYLE = -20
-WS_VISIBLE = 0x10000000
-WS_EX_TOOLWINDOW = 0x00000080
-WS_EX_APPWINDOW = 0x00040000
-SMTO_FLAGS = 0x0002 | 0x0001
-HANG_PING_TIMEOUT_MS = 1000
-
-MB_YESNO = 0x00000004
-MB_ICONWARNING = 0x00000030
-MB_ICONINFORMATION = 0x00000040
-MB_TOPMOST = 0x00040000
-MB_SETFOREGROUND = 0x00010000
-IDYES = 6
-
-ICON_CANVAS_SIZE = 64
-ICON_BACKGROUND = (28, 28, 32, 255)
-ICON_BORDER_COLOUR = (210, 210, 220, 255)
-ICON_FILL_COLOUR = (52, 86, 120, 255)
-ICON_TEXT_COLOUR = (245, 245, 245, 255)
+from typing import Callable, Optional
 
 
-def resolve_base_dir() -> Path:
+def resolveBaseDir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
+    nuitkaParent = _nuitkaBundleParent()
+    if nuitkaParent is not None:
+        return nuitkaParent
     return Path(__file__).resolve().parent
 
 
-def resolve_data_dir() -> Path:
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        candidate = Path(local_appdata) / APP_NAME
+def _nuitkaBundleParent() -> Optional[Path]:
+    if "__compiled__" in globals():
+        try:
+            return Path(sys.argv[0]).resolve().parent
+        except Exception:
+            return None
+    return None
+
+
+def resolveBundleDir() -> Path:
+    pyInstallerExtract = getattr(sys, "_MEIPASS", None)
+    if pyInstallerExtract:
+        return Path(pyInstallerExtract)
+    try:
+        return Path(__file__).resolve().parent
+    except Exception:
+        return resolveBaseDir()
+
+
+def resolveDataDir() -> Path:
+    localAppData = os.environ.get("LOCALAPPDATA")
+    if localAppData:
+        candidate = Path(localAppData) / "TBHWatcher"
     else:
         home = os.environ.get("HOME") or str(Path.home())
-        candidate = Path(home) / ".local" / "share" / APP_NAME
+        candidate = Path(home) / ".local" / "share" / "TBHWatcher"
     try:
         candidate.mkdir(parents=True, exist_ok=True)
         return candidate
     except Exception:
-        return resolve_base_dir()
+        return resolveBaseDir()
 
 
-BASE_DIR: Path = resolve_base_dir()
-DATA_DIR: Path = resolve_data_dir()
-CONFIG_FILE: Path = DATA_DIR / CONFIG_FILENAME
-LOG_FILE: Path = DATA_DIR / LOG_FILENAME
-TEMP_ROOT_PREFIX: str = "_MEI_steam_"
+baseDir: Path = resolveBaseDir()
+bundleDir: Path = resolveBundleDir()
+dataDir: Path = resolveDataDir()
+configFile: Path = dataDir / "TBHWatcher_config.json"
+logFile: Path = dataDir / "TBHWatcher.log"
+tempRootPrefix: str = "_MEI_steam_"
 
 
-DEFAULT_CONFIG: dict = {
+defaultConfig: dict = {
     "task_process_name": "TaskBarHero.exe",
     "game_app_id": "3678970",
     "game_process_name": None,
@@ -95,7 +80,28 @@ DEFAULT_CONFIG: dict = {
     "speedy_delay_jitter_seconds": 2.0,
     "speedy_init_seconds": 3.0,
     "refresher_interval_jitter_seconds": 20.0,
-    "focus_shield_seconds": 15.0,
+    "popup_suppressor_enabled": True,
+    "popup_suppressor_seconds": 45.0,
+    "popup_suppressor_restore_on_stop": True,
+    "desktop_exile_enabled": False,
+    "desktop_exile_game_title": "Task Bar Hero",
+    "desktop_exile_game_enabled": False,
+    "desktop_exile_game_to_hidden": True,
+    "desktop_exile_minimise_game": True,
+    "desktop_exile_prelaunch_steam": True,
+    "desktop_exile_hide_popup": True,
+    "desktop_exile_steam_to_tray": True,
+    "desktop_exile_restore_focus": True,
+    "desktop_exile_switch_launch": False,
+    "desktop_exile_switch_back_seconds": 1.5,
+    "desktop_exile_fast_seconds": 8.0,
+    "desktop_exile_fast_poll_seconds": 0.05,
+    "desktop_exile_watch_seconds": 40.0,
+    "desktop_exile_poll_seconds": 0.5,
+    "focus_shield_enabled": False,
+    "focus_shield_watch_seconds": 15.0,
+    "focus_shield_poll_seconds": 0.5,
+    "focus_shield_restore_cooldown_seconds": 1.0,
     "dll_reroller_enabled": True,
     "dll_mutation_pefile_enabled": False,
     "splash_enabled": True,
@@ -106,29 +112,29 @@ DEFAULT_CONFIG: dict = {
 }
 
 
-def build_logger() -> logging.Logger:
-    instance = logging.getLogger(APP_NAME)
+def buildLogger() -> logging.Logger:
+    instance = logging.getLogger("TBHWatcher")
     instance.setLevel(logging.INFO)
     if not instance.handlers:
-        rotating_handler = RotatingFileHandler(
-            str(LOG_FILE),
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
+        handler = RotatingFileHandler(
+            str(logFile),
+            maxBytes=1024 * 1024,
+            backupCount=3,
             encoding="utf-8",
         )
-        rotating_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        instance.addHandler(rotating_handler)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        instance.addHandler(handler)
     return instance
 
 
-logger: logging.Logger = build_logger()
+logger: logging.Logger = buildLogger()
 
 
-def log(message: str) -> None:
+def logInfo(message: str) -> None:
     logger.info(message)
 
 
-ERROR_HINTS = {
+errorHints = {
     "PermissionError": "Access denied -- try running as Administrator, or a file is locked by another process.",
     "FileNotFoundError": "A required file/path is missing -- check the OpenSpeedy install or temp store.",
     "OSError": "OS/filesystem issue -- disk full, path too long, or a handle is still open.",
@@ -140,322 +146,424 @@ ERROR_HINTS = {
 }
 
 
-def _hint_for(error: BaseException) -> str:
-    short_name = type(error).__name__
-    qualified_name = f"{type(error).__module__}.{short_name}"
-    return ERROR_HINTS.get(qualified_name, ERROR_HINTS.get(short_name, "No specific hint; see traceback above."))
+def hintFor(error: BaseException) -> str:
+    shortName = type(error).__name__
+    fullName = f"{type(error).__module__}.{shortName}"
+    return errorHints.get(fullName, errorHints.get(shortName, "No specific hint; see traceback above."))
 
 
-def _calling_location() -> str:
+def callerModule() -> str:
     import inspect
     try:
-        frame_info = inspect.stack()[2]
-        module = inspect.getmodule(frame_info[0])
-        module_name = getattr(module, "__name__", None)
-        function_name = frame_info.function
-        return f"{module_name}.{function_name}" if module_name else function_name
+        frame = inspect.stack()[2]
+        module = inspect.getmodule(frame[0])
+        moduleName = getattr(module, "__name__", None)
+        functionName = frame.function
+        return f"{moduleName}.{functionName}" if moduleName else functionName
     except Exception:
         return "unknown"
 
 
-def log_error(message: str, exc: BaseException | None = None, where: str = "") -> None:
+def logError(message: str, error: Optional[BaseException] = None, where: str = "") -> None:
     import traceback
-    location = where or _calling_location()
-    if exc is not None:
-        hint = _hint_for(exc)
-        logger.error(f"[ERROR] in {location}: {message} | type={type(exc).__name__} | hint: {hint}")
-        logger.error("Traceback:\n" + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    location = where or callerModule()
+    if error is not None:
+        hint = hintFor(error)
+        logger.error(f"[ERROR] in {location}: {message} | type={type(error).__name__} | hint: {hint}")
+        logger.error("Traceback:\n" + "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)))
     else:
         logger.exception(f"[ERROR] in {location}: {message}")
 
 
-_single_instance_handle = None
+singleInstanceHandle = None
+mutexName = "Global\\TBHWatcher_SingleInstance_Mutex"
 
 
-def acquire_single_instance() -> bool:
-    global _single_instance_handle
+def acquireSingleInstance() -> bool:
+    global singleInstanceHandle
     try:
         if sys.platform.startswith("win"):
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-            kernel32.CreateMutexW.restype = ctypes.c_void_p
-            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-            mutex_handle = kernel32.CreateMutexW(None, 1, SINGLE_INSTANCE_MUTEX_NAME)
-            last_error = ctypes.get_last_error()
-            if not mutex_handle:
-                log("[main] Single-instance: could not create mutex; allowing start.")
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CreateMutexW.restype = ctypes.c_void_p
+            kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+            handle = kernel.CreateMutexW(None, 1, mutexName)
+            lastError = ctypes.get_last_error()
+            alreadyExists = 183
+            if not handle:
+                logInfo("[main] Single-instance: could not create mutex; allowing start.")
                 return True
-            if last_error == ERROR_ALREADY_EXISTS:
-                log("[main] Single-instance: another watcher is already running.")
+            if lastError == alreadyExists:
+                logInfo("[main] Single-instance: another watcher is already running.")
                 return False
-            _single_instance_handle = mutex_handle
+            singleInstanceHandle = handle
             return True
     except Exception as error:
-        log(f"[main] Single-instance mutex check failed ({error}); using lockfile.")
+        logInfo(f"[main] Single-instance mutex check failed ({error}); using lockfile.")
 
     try:
-        lock_file = DATA_DIR / LOCK_FILENAME
-        if lock_file.exists():
+        lockPath = dataDir / "TBHWatcher.lock"
+        if lockPath.exists():
             try:
                 import psutil
-                previous_pid = int(lock_file.read_text(encoding="utf-8").strip() or "0")
-                if previous_pid and psutil.pid_exists(previous_pid):
-                    log(f"[main] Single-instance: live instance pid {previous_pid} holds the lock.")
+                previousPid = int(lockPath.read_text(encoding="utf-8").strip() or "0")
+                if previousPid and psutil.pid_exists(previousPid):
+                    logInfo(f"[main] Single-instance: live instance pid {previousPid} holds the lock.")
                     return False
             except Exception:
                 pass
-        lock_file.write_text(str(os.getpid()), encoding="utf-8")
-        _single_instance_handle = lock_file
+        lockPath.write_text(str(os.getpid()), encoding="utf-8")
+        singleInstanceHandle = lockPath
         return True
     except Exception as error:
-        log(f"[main] Single-instance lockfile failed ({error}); allowing start.")
+        logInfo(f"[main] Single-instance lockfile failed ({error}); allowing start.")
         return True
 
 
-def warn_already_running() -> None:
+def warnAlreadyRunning() -> None:
     if user32 is None:
         return
     try:
+        iconInformation = 0x00000040
+        topMost = 0x00040000
         user32.MessageBoxW(None, "TBH Watcher is already running (check the system tray).",
-                           "TBH Watcher", MB_ICONINFORMATION | MB_TOPMOST)
+                           "TBH Watcher", iconInformation | topMost)
     except Exception:
         pass
 
 
-def install_global_excepthook() -> None:
+def installGlobalExceptHook() -> None:
     import traceback
 
-    def handle_uncaught(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
+    def handleException(errorType, errorValue, errorTraceback):
+        if issubclass(errorType, KeyboardInterrupt):
             return
-        hint = _hint_for(exc_value) if exc_value else "see traceback"
-        logger.error(f"[UNCAUGHT] {exc_type.__name__}: {exc_value} | hint: {hint}")
-        logger.error("Traceback:\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+        hint = hintFor(errorValue) if errorValue else "see traceback"
+        logger.error(f"[UNCAUGHT] {errorType.__name__}: {errorValue} | hint: {hint}")
+        logger.error("Traceback:\n" + "".join(
+            traceback.format_exception(errorType, errorValue, errorTraceback)))
 
-    sys.excepthook = handle_uncaught
+    sys.excepthook = handleException
 
-    def handle_thread_exception(args):
-        handle_uncaught(args.exc_type, args.exc_value, args.exc_traceback)
+    def handleThreadException(args):
+        handleException(args.exc_type, args.exc_value, args.exc_traceback)
 
     try:
-        threading.excepthook = handle_thread_exception
+        threading.excepthook = handleThreadException
     except Exception:
         pass
 
     logger.info("[main] Global exception hook installed (uncaught errors will be logged).")
 
 
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
+def loadConfig() -> dict:
+    if configFile.exists():
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+            with open(configFile, "r", encoding="utf-8") as handle:
                 stored = json.load(handle)
-            merged = DEFAULT_CONFIG.copy()
+            merged = defaultConfig.copy()
             merged.update(stored)
             return merged
         except Exception as error:
-            log(f"[config] Failed to parse config, using defaults: {error}")
-    return DEFAULT_CONFIG.copy()
+            logInfo(f"[config] Failed to parse config, using defaults: {error}")
+    return defaultConfig.copy()
 
 
-def save_config(config: dict) -> None:
-    temp_file = CONFIG_FILE.with_suffix(".json.tmp")
+def saveConfig(config: dict) -> None:
+    temporaryFile = None
     try:
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(temp_file, "w", encoding="utf-8") as handle:
+        configFile.parent.mkdir(parents=True, exist_ok=True)
+        temporaryFile = configFile.with_suffix(".json.tmp")
+        with open(temporaryFile, "w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=4)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_file, CONFIG_FILE)
+        os.replace(temporaryFile, configFile)
     except Exception as error:
-        log(f"[config] Failed to save config: {error}")
+        logInfo(f"[config] Failed to save config: {error}")
         try:
-            if temp_file.exists():
-                temp_file.unlink()
+            if temporaryFile is not None and temporaryFile.exists():
+                temporaryFile.unlink()
         except Exception:
             pass
 
 
-def update_config_key(key: str, value) -> dict:
-    config = load_config()
+def updateConfigKey(key: str, value) -> dict:
+    config = loadConfig()
     config[key] = value
-    save_config(config)
+    saveConfig(config)
     return config
 
 
-def _load_user32():
+def loadUser32():
     try:
-        return ctypes.windll.user32  # type: ignore[attr-defined]
+        return ctypes.windll.user32
     except Exception:
         return None
 
 
-user32 = _load_user32()
+user32 = loadUser32()
 
-_WindowEnumeratorType = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
-EnumWindowsProc = _WindowEnumeratorType(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+windowEnumFactory = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+EnumWindowsProc = windowEnumFactory(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
 
-def enum_windows_for_pid(pid: int, only_visible: bool = True) -> list[int]:
+def enumWindowsForPid(pid: int, onlyVisible: bool = True) -> list[int]:
     windows: list[int] = []
     if user32 is None:
         return windows
 
     @EnumWindowsProc
-    def collect(window_handle, _lparam):
+    def callback(handle, _lparam):
         try:
-            owning_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(window_handle, ctypes.byref(owning_pid))
-            if owning_pid.value == pid and (not only_visible or user32.IsWindowVisible(window_handle)):
-                windows.append(window_handle)
+            owner = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+            if owner.value == pid and (not onlyVisible or user32.IsWindowVisible(handle)):
+                windows.append(handle)
         except Exception:
             pass
         return True
 
     try:
-        user32.EnumWindows(collect, 0)
+        user32.EnumWindows(callback, 0)
     except Exception as error:
-        log(f"[win32] EnumWindows failed: {error}")
+        logInfo(f"[win32] EnumWindows failed: {error}")
     return windows
 
 
-def enum_all_top_level_windows() -> list[tuple[int, int, str, bool]]:
-    results: list[tuple[int, int, str, bool]] = []
+def enumAllTopLevelWindows() -> list[tuple]:
+    results: list[tuple] = []
     if user32 is None:
         return results
 
     @EnumWindowsProc
-    def collect(window_handle, _lparam):
+    def callback(handle, _lparam):
         try:
-            owning_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(window_handle, ctypes.byref(owning_pid))
-            title_length = user32.GetWindowTextLengthW(window_handle)
+            owner = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+            textLength = user32.GetWindowTextLengthW(handle)
             title = ""
-            if title_length > 0:
-                title_buffer = ctypes.create_unicode_buffer(title_length + 1)
-                user32.GetWindowTextW(window_handle, title_buffer, title_length + 1)
-                title = title_buffer.value
-            is_visible = bool(user32.IsWindowVisible(window_handle))
-            results.append((int(window_handle), int(owning_pid.value), title, is_visible))
+            if textLength > 0:
+                buffer = ctypes.create_unicode_buffer(textLength + 1)
+                user32.GetWindowTextW(handle, buffer, textLength + 1)
+                title = buffer.value
+            visible = bool(user32.IsWindowVisible(handle))
+            results.append((int(handle), int(owner.value), title, visible))
         except Exception:
             pass
         return True
 
     try:
-        user32.EnumWindows(collect, 0)
+        user32.EnumWindows(callback, 0)
     except Exception as error:
-        log(f"[win32] EnumWindows(all) failed: {error}")
+        logInfo(f"[win32] EnumWindows(all) failed: {error}")
     return results
 
 
-def diagnose_own_windows(self_pid: int) -> list[dict]:
-    results: list[dict] = []
+def diagnoseOwnWindows(selfPid: int) -> list[dict]:
+    found: list[dict] = []
     if user32 is None:
-        return results
+        return found
 
-    get_window_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+    styleIndex = -16
+    exStyleIndex = -20
+    visibleFlag = 0x10000000
+    toolWindowFlag = 0x00000080
+    appWindowFlag = 0x00040000
+    getWindowLong = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
 
     @EnumWindowsProc
-    def collect(window_handle, _lparam):
+    def callback(handle, _lparam):
         try:
-            owning_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(window_handle, ctypes.byref(owning_pid))
-            if owning_pid.value != self_pid:
+            owner = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+            if owner.value != selfPid:
                 return True
-            title_length = user32.GetWindowTextLengthW(window_handle)
+            textLength = user32.GetWindowTextLengthW(handle)
             title = ""
-            if title_length > 0:
-                title_buffer = ctypes.create_unicode_buffer(title_length + 1)
-                user32.GetWindowTextW(window_handle, title_buffer, title_length + 1)
-                title = title_buffer.value
-            class_buffer = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(window_handle, class_buffer, 256)
-            style = int(get_window_long(window_handle, GWL_STYLE))
-            extended_style = int(get_window_long(window_handle, GWL_EXSTYLE))
-            owner_window = int(user32.GetWindow(window_handle, GW_OWNER))
-            shows_on_taskbar = (
-                bool(style & WS_VISIBLE)
-                and owner_window == 0
-                and (bool(extended_style & WS_EX_APPWINDOW) or not (extended_style & WS_EX_TOOLWINDOW))
+            if textLength > 0:
+                buffer = ctypes.create_unicode_buffer(textLength + 1)
+                user32.GetWindowTextW(handle, buffer, textLength + 1)
+                title = buffer.value
+            classBuffer = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(handle, classBuffer, 256)
+            style = int(getWindowLong(handle, styleIndex))
+            exStyle = int(getWindowLong(handle, exStyleIndex))
+            ownerHandle = int(user32.GetWindow(handle, 4))
+            onTaskbar = (
+                bool(style & visibleFlag)
+                and ownerHandle == 0
+                and (bool(exStyle & appWindowFlag) or not (exStyle & toolWindowFlag))
             )
-            results.append({
-                "hwnd": int(window_handle), "title": title, "class": class_buffer.value,
-                "visible": bool(style & WS_VISIBLE),
-                "toolwindow": bool(extended_style & WS_EX_TOOLWINDOW),
-                "appwindow": bool(extended_style & WS_EX_APPWINDOW),
-                "has_owner": owner_window != 0,
-                "likely_taskbar": shows_on_taskbar,
+            found.append({
+                "hwnd": int(handle), "title": title, "class": classBuffer.value,
+                "visible": bool(style & visibleFlag),
+                "toolwindow": bool(exStyle & toolWindowFlag),
+                "appwindow": bool(exStyle & appWindowFlag),
+                "has_owner": ownerHandle != 0,
+                "likely_taskbar": onTaskbar,
             })
         except Exception:
             pass
         return True
 
     try:
-        user32.EnumWindows(collect, 0)
+        user32.EnumWindows(callback, 0)
     except Exception as error:
-        log(f"[win32] diagnose_own_windows failed: {error}")
-    return results
+        logInfo(f"[win32] diagnoseOwnWindows failed: {error}")
+    return found
 
 
-def strip_from_taskbar(hwnd: int) -> bool:
+def stripFromTaskbar(handle: int) -> bool:
     if user32 is None:
         return False
+    exStyleIndex = -20
+    toolWindowFlag = 0x00000080
+    appWindowFlag = 0x00040000
+    swHide = 0
     try:
-        get_window_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
-        set_window_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
-        extended_style = int(get_window_long(hwnd, GWL_EXSTYLE))
-        extended_style = (extended_style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-        set_window_long(hwnd, GWL_EXSTYLE, extended_style)
-        user32.ShowWindow(hwnd, SW_HIDE)
+        getLong = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        setLong = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        exStyle = int(getLong(handle, exStyleIndex))
+        exStyle = (exStyle | toolWindowFlag) & ~appWindowFlag
+        setLong(handle, exStyleIndex, exStyle)
+        user32.ShowWindow(handle, swHide)
         return True
     except Exception as error:
-        log(f"[win32] strip_from_taskbar failed: {error}")
+        logInfo(f"[win32] stripFromTaskbar failed: {error}")
         return False
 
 
-def hide_window(hwnd: int) -> None:
+def hideWindow(handle: int) -> None:
     if user32 is not None:
         try:
-            user32.ShowWindow(hwnd, SW_HIDE)
+            user32.ShowWindow(handle, 0)
         except Exception as error:
-            log(f"[win32] ShowWindow(hide) failed: {error}")
+            logInfo(f"[win32] ShowWindow(hide) failed: {error}")
 
 
-def close_window(hwnd: int) -> None:
+def closeWindow(handle: int) -> None:
     if user32 is not None:
         try:
-            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            user32.PostMessageW(handle, 0x0010, 0, 0)
         except Exception as error:
-            log(f"[win32] PostMessage(WM_CLOSE) failed: {error}")
+            logInfo(f"[win32] PostMessage(WM_CLOSE) failed: {error}")
 
 
-def restore_and_focus(hwnd: int) -> None:
-    if user32 is not None:
-        try:
-            user32.ShowWindow(hwnd, SW_RESTORE)
-            user32.SetForegroundWindow(hwnd)
-        except Exception as error:
-            log(f"[win32] restore_and_focus failed: {error}")
-
-
-def confirm_dialog(title: str, message: str) -> bool:
+def allowSetForeground() -> None:
     if user32 is None:
-        log("[win32] confirm_dialog: no GUI available; treating as No.")
+        return
+    try:
+        user32.AllowSetForegroundWindow(-1)
+    except Exception as error:
+        logInfo(f"[win32] AllowSetForegroundWindow failed: {error}")
+
+
+def forceForegroundOnce(handle: int) -> bool:
+    if user32 is None or not handle:
+        return False
+    kernel = None
+    try:
+        kernel = ctypes.windll.kernel32
+    except Exception:
+        kernel = None
+    currentThread = 0
+    targetThread = 0
+    attached = False
+    try:
+        try:
+            user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+        if kernel is not None:
+            try:
+                currentThread = kernel.GetCurrentThreadId()
+                foreground = user32.GetForegroundWindow()
+                targetThread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+                if targetThread and targetThread != currentThread:
+                    attached = bool(user32.AttachThreadInput(currentThread, targetThread, True))
+            except Exception:
+                attached = False
+        result = bool(user32.SetForegroundWindow(handle))
+        return result
+    except Exception as error:
+        logInfo(f"[win32] forceForegroundOnce failed: {error}")
+        return False
+    finally:
+        if attached and currentThread and targetThread:
+            try:
+                user32.AttachThreadInput(currentThread, targetThread, False)
+            except Exception:
+                pass
+
+
+def stopFlashing(handle: int) -> None:
+    if user32 is None or not handle:
+        return
+    try:
+        info = ctypes.Structure
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint),
+                ("hwnd", ctypes.c_void_p),
+                ("dwFlags", ctypes.c_uint),
+                ("uCount", ctypes.c_uint),
+                ("dwTimeout", ctypes.c_uint),
+            ]
+        flash = FLASHWINFO()
+        flash.cbSize = ctypes.sizeof(FLASHWINFO)
+        flash.hwnd = ctypes.c_void_p(handle)
+        flash.dwFlags = 0
+        flash.uCount = 0
+        flash.dwTimeout = 0
+        user32.FlashWindowEx(ctypes.byref(flash))
+    except Exception as error:
+        logInfo(f"[win32] stopFlashing failed: {error}")
+
+
+def setForeground(handle: int) -> bool:
+    if user32 is None or not handle:
         return False
     try:
-        show_message_box = user32.MessageBoxW
-        show_message_box.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
-        show_message_box.restype = ctypes.c_int
-        clicked = show_message_box(None, message, title,
-                                   MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND)
-        log(f"[win32] confirm_dialog '{title}': user clicked code {clicked} "
-            f"({'YES' if clicked == IDYES else 'NO/other'}).")
-        return clicked == IDYES
+        return bool(user32.SetForegroundWindow(handle))
     except Exception as error:
-        log(f"[win32] confirm_dialog failed ({error}); treating as No.")
+        logInfo(f"[win32] setForeground failed: {error}")
         return False
 
 
-def get_foreground_window() -> int:
+def minimiseWindow(handle: int) -> bool:
+    if user32 is None or not handle:
+        return False
+    try:
+        return bool(user32.ShowWindow(handle, 6))
+    except Exception as error:
+        logInfo(f"[win32] minimiseWindow failed: {error}")
+        return False
+
+
+def confirmDialog(title: str, message: str) -> bool:
+    if user32 is None:
+        logInfo("[win32] confirmDialog: no GUI available; treating as No.")
+        return False
+    try:
+        messageBox = user32.MessageBoxW
+        messageBox.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        messageBox.restype = ctypes.c_int
+        yesNo = 0x00000004
+        iconWarning = 0x00000030
+        topMost = 0x00040000
+        setForeground = 0x00010000
+        idYes = 6
+        result = messageBox(None, message, title, yesNo | iconWarning | topMost | setForeground)
+        logInfo(f"[win32] confirmDialog '{title}': user clicked code {result} "
+                f"({'YES' if result == idYes else 'NO/other'}).")
+        return result == idYes
+    except Exception as error:
+        logInfo(f"[win32] confirmDialog failed ({error}); treating as No.")
+        return False
+
+
+def getForegroundWindow() -> int:
     if user32 is None:
         return 0
     try:
@@ -464,47 +572,51 @@ def get_foreground_window() -> int:
         return 0
 
 
-def get_window_pid(hwnd: int) -> int:
+def getWindowPid(handle: int) -> int:
     if user32 is None:
         return 0
     try:
-        owning_pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owning_pid))
-        return int(owning_pid.value)
+        owner = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+        return int(owner.value)
     except Exception:
         return 0
 
 
-def is_window_hung(hwnd: int) -> bool:
+def isWindowHung(handle: int) -> bool:
     if user32 is None:
         return False
     try:
-        if user32.IsHungAppWindow(hwnd):
+        if user32.IsHungAppWindow(handle):
             return True
     except Exception as error:
-        log(f"[win32] IsHungAppWindow failed: {error}")
+        logInfo(f"[win32] IsHungAppWindow failed: {error}")
     try:
-        ping_result = ctypes.c_ulong()
-        user32.SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_FLAGS, HANG_PING_TIMEOUT_MS, ctypes.byref(ping_result))
-        if ping_result.value == 0 and user32.IsHungAppWindow(hwnd):
+        result = ctypes.c_ulong()
+        windowNull = 0x0000
+        abortIfHung = 0x0002
+        blockSender = 0x0001
+        user32.SendMessageTimeoutW(handle, windowNull, 0, 0,
+                                   abortIfHung | blockSender, 1000, ctypes.byref(result))
+        if result.value == 0 and user32.IsHungAppWindow(handle):
             return True
     except Exception as error:
-        log(f"[win32] SendMessageTimeout failed: {error}")
+        logInfo(f"[win32] SendMessageTimeout failed: {error}")
     return False
 
 
 @dataclass
 class WatchState:
-    current_task: str = "Starting"
-    tbh_state: str = "Unknown"
-    game_state: str = "Unknown"
-    refresher_status: str = "Disabled"
-    dll_status: str = "Idle"
-    last_event: str = "Idle"
+    currentTask: str = "Starting"
+    tbhState: str = "Unknown"
+    gameState: str = "Unknown"
+    refresherStatus: str = "Disabled"
+    dllStatus: str = "Idle"
+    lastEvent: str = "Idle"
     running: bool = True
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def set(self, **fields) -> None:
+    def setFields(self, **fields) -> None:
         with self.lock:
             for key, value in fields.items():
                 if hasattr(self, key):
@@ -513,95 +625,94 @@ class WatchState:
     def snapshot(self) -> dict:
         with self.lock:
             return {
-                "current_task": self.current_task,
-                "tbh_state": self.tbh_state,
-                "game_state": self.game_state,
-                "refresher_status": self.refresher_status,
-                "dll_status": self.dll_status,
-                "last_event": self.last_event,
+                "currentTask": self.currentTask,
+                "tbhState": self.tbhState,
+                "gameState": self.gameState,
+                "refresherStatus": self.refresherStatus,
+                "dllStatus": self.dllStatus,
+                "lastEvent": self.lastEvent,
                 "running": self.running,
             }
 
 
-def _resolve_icon_file() -> Path:
-    candidates = [BASE_DIR / "ico.ico"]
-    bundle_extract_dir = getattr(sys, "_MEIPASS", None)
-    if bundle_extract_dir:
-        candidates.append(Path(bundle_extract_dir) / "ico.ico")
+def resolveIconFile() -> Path:
+    candidates = [baseDir / "ico.ico", bundleDir / "ico.ico"]
     for candidate in candidates:
         try:
             if candidate.exists():
                 return candidate
         except Exception:
             continue
-    return BASE_DIR / "ico.ico"
+    return baseDir / "ico.ico"
 
 
-ICON_FILE: Path = _resolve_icon_file()
+iconFile: Path = resolveIconFile()
 
 
-def build_icon_image():
+def buildIconImage():
     from PIL import Image, ImageDraw
 
-    if ICON_FILE.exists():
+    if iconFile.exists():
         try:
-            return Image.open(str(ICON_FILE)).convert("RGBA")
+            return Image.open(str(iconFile)).convert("RGBA")
         except Exception as error:
-            log(f"[icon] Failed to load custom ico.ico ({error}); using default icon.")
+            logInfo(f"[icon] Failed to load custom ico.ico ({error}); using default icon.")
 
-    size = ICON_CANVAS_SIZE
-    image = Image.new("RGBA", (size, size), ICON_BACKGROUND)
+    size = 64
+    image = Image.new("RGBA", (size, size), (28, 28, 32, 255))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((4, 4, size - 4, size - 4), radius=14, outline=ICON_BORDER_COLOUR, width=2)
-    draw.rounded_rectangle((10, 10, size - 10, size - 10), radius=10, fill=ICON_FILL_COLOUR)
-    draw.text((16, 20), "TBH", fill=ICON_TEXT_COLOUR)
+    draw.rounded_rectangle((4, 4, size - 4, size - 4), radius=14,
+                           outline=(210, 210, 220, 255), width=2)
+    draw.rounded_rectangle((10, 10, size - 10, size - 10), radius=10,
+                           fill=(52, 86, 120, 255))
+    draw.text((16, 20), "TBH", fill=(245, 245, 245, 255))
     return image
 
 
 def diagnose(report: Callable[[str, str, str], None]) -> list[str]:
-    problems: list[str] = []
+    issues: list[str] = []
 
-    report("config.base_dir", "PASS", str(BASE_DIR))
-    report("config.data_dir", "PASS", str(DATA_DIR))
+    report("config.base_dir", "PASS", str(baseDir))
+    report("config.data_dir", "PASS", str(dataDir))
 
     try:
-        config = load_config()
-        missing_keys = [key for key in DEFAULT_CONFIG if key not in config]
-        if missing_keys:
-            report("config.load", "FAIL", f"missing keys: {missing_keys}")
-            problems.append("config keys missing")
+        config = loadConfig()
+        missing = [key for key in defaultConfig if key not in config]
+        if missing:
+            report("config.load", "FAIL", f"missing keys: {missing}")
+            issues.append("config keys missing")
         else:
             report("config.load", "PASS", f"{len(config)} keys loaded")
     except Exception as error:
         report("config.load", "FAIL", str(error))
-        problems.append("config load raised")
+        issues.append("config load raised")
 
     try:
-        probe_file = DATA_DIR / "._tbh_write_probe.tmp"
-        probe_file.write_text("ok", encoding="utf-8")
-        probe_file.unlink()
-        report("config.write", "PASS", f"data dir writable ({DATA_DIR})")
+        probe = dataDir / "._tbh_write_probe.tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        report("config.write", "PASS", f"data dir writable ({dataDir})")
     except Exception as error:
         report("config.write", "FAIL", f"data dir not writable: {error}")
-        problems.append("data dir not writable")
+        issues.append("data dir not writable")
 
     report("win32.user32", "PASS" if user32 is not None else "INFO",
            "loaded" if user32 is not None else "unavailable (non-Windows)")
 
     try:
         state = WatchState()
-        state.set(last_event="diag")
-        assert state.snapshot()["last_event"] == "diag"
+        state.setFields(lastEvent="diag")
+        assert state.snapshot()["lastEvent"] == "diag"
         report("state.shared", "PASS", "read/write round-trip ok")
     except Exception as error:
         report("state.shared", "FAIL", str(error))
-        problems.append("shared state broken")
+        issues.append("shared state broken")
 
-    return problems
+    return issues
 
 
 if __name__ == "__main__":
-    def _print_row(component, status, detail):
+    def printer(component, status, detail):
         print(f"[{status:4}] {component:24} {detail}")
-    found = diagnose(_print_row)
-    print("OK" if not found else f"ISSUES: {found}")
+    foundIssues = diagnose(printer)
+    print("OK" if not foundIssues else f"ISSUES: {foundIssues}")

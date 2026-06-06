@@ -8,54 +8,48 @@ import time
 import pystray
 
 from watcher_config import (
-    CONFIG_FILE,
-    DEFAULT_CONFIG,
-    LOG_FILE,
+    configFile,
+    defaultConfig,
+    logFile,
     WatchState,
-    build_icon_image,
-    confirm_dialog,
-    acquire_single_instance,
-    install_global_excepthook,
-    load_config,
-    warn_already_running,
-    log,
-    log_error,
-    save_config,
-    update_config_key,
+    buildIconImage,
+    confirmDialog,
+    acquireSingleInstance,
+    installGlobalExceptHook,
+    loadConfig,
+    warnAlreadyRunning,
+    logInfo,
+    logError,
+    saveConfig,
+    updateConfigKey,
 )
 import stealth_temp
 import dll_mutate
 from splash import Splash
-from speedy_dll import CAMOUFLAGE_NAMES, SpeedyDLLManager
+from speedy_dll import camouflageNames, SpeedyDLLManager
 from boot import GameBooter
+from desktop_exile import DesktopExile
+from popup_suppressor import PopupSuppressor
 from refresher import Refresher
 
 if sys.platform.startswith("win"):
     try:
-        import pystray._win32  # noqa: F401
+        import pystray._win32
     except ImportError:
         pass
 
-TRAY_ICON_ID = "TBHWatcher"
-TRAY_ICON_TOOLTIP = "TBH Watcher"
-STARTUP_PHASE_COUNT = 6
-SECONDS_PER_MINUTE = 60
-DEFAULT_INTERVAL_MINUTES = 7.0
-READY_NOTIFICATION_DELAY_SECONDS = 1.5
-QUICK_CLOSE_TIMEOUT_SECONDS = 2
 
-
-class _NullSplash:
+class NullSplash:
     def start(self) -> None:
         pass
 
-    def step(self, phase_label: str) -> None:
+    def step(self, label: str) -> None:
         pass
 
-    def message(self, text: str) -> None:
+    def message(self, label: str) -> None:
         pass
 
-    def notify_ready(self, tray_icon=None) -> None:
+    def notifyReady(self, icon=None) -> None:
         pass
 
     def finish(self) -> None:
@@ -64,322 +58,346 @@ class _NullSplash:
 
 class ConfigHolder:
     def __init__(self) -> None:
-        self._last_mtime = 0.0
+        self.lastModified = 0.0
         self.raw: dict = {}
-        self._lock = threading.Lock()
-        for key, value in DEFAULT_CONFIG.items():
+        self.lock = threading.Lock()
+        for key, value in defaultConfig.items():
             setattr(self, key, value)
         self.reload(force=True)
 
     def reload(self, force: bool = False) -> None:
-        with self._lock:
+        with self.lock:
             try:
-                current_mtime = CONFIG_FILE.stat().st_mtime
+                modified = configFile.stat().st_mtime
             except OSError:
-                if not CONFIG_FILE.exists():
-                    save_config(DEFAULT_CONFIG)
-                current_mtime = 1.0
-            if not force and current_mtime == self._last_mtime:
+                if not configFile.exists():
+                    saveConfig(defaultConfig)
+                modified = 1.0
+            if not force and modified == self.lastModified:
                 return
-            self._last_mtime = current_mtime
-            self.raw = load_config()
+            self.lastModified = modified
+            self.raw = loadConfig()
             for key, value in self.raw.items():
                 setattr(self, key, value)
-            self.refresher_interval_seconds = (
-                self.raw.get("refresher_interval_minutes", DEFAULT_INTERVAL_MINUTES) * SECONDS_PER_MINUTE
-            )
-        log(f"[main] Config (re)loaded: interval={self.raw.get('refresher_interval_minutes')}m, "
-            f"cooldown={self.raw.get('refresher_cooldown_seconds')}s.")
+            self.refresher_interval_seconds = self.raw.get("refresher_interval_minutes", 7.0) * 60
+        logInfo(f"[main] Config (re)loaded: interval={self.raw.get('refresher_interval_minutes')}m, "
+                f"cooldown={self.raw.get('refresher_cooldown_seconds')}s.")
+
+
+rollbackPrompt = (
+    "ROLLBACK ALL — safe reset\n"
+    "\n"
+    "This will:\n"
+    "  - close any running Speedy / bridge processes,\n"
+    "  - delete every temp sandbox folder this tool created,\n"
+    "  - delete every saved camouflage state + its history.\n"
+    "\n"
+    "This will KEEP the pristine baseline (the untouched copy of the\n"
+    "original Speedy files), so the next boot can re-roll a DLL name\n"
+    "instantly. Your real OpenSpeedy install is NOT touched.\n"
+    "\n"
+    "Proceed with Rollback All?"
+)
+
+unpatchPrompt = (
+    "UNPATCH — full removal (zero footprint)\n"
+    "\n"
+    "This will:\n"
+    "  - close any running Speedy / bridge processes,\n"
+    "  - delete every temp sandbox folder this tool created,\n"
+    "  - delete the ENTIRE backups folder, INCLUDING the pristine\n"
+    "    baseline copy of the original Speedy files.\n"
+    "\n"
+    "Nothing this tool created will remain. The next boot must re-copy\n"
+    "a fresh pristine baseline from your live OpenSpeedy install first,\n"
+    "so that first boot is slightly slower. Your real OpenSpeedy install\n"
+    "is NOT touched.\n"
+    "\n"
+    "Proceed with full Unpatch?"
+)
 
 
 class TBHWatcher:
-    ROLLBACK_PROMPT = (
-        "ROLLBACK ALL — safe reset\n"
-        "\n"
-        "This will:\n"
-        "  - close any running Speedy / bridge processes,\n"
-        "  - delete every temp sandbox folder this tool created,\n"
-        "  - delete every saved camouflage state + its history.\n"
-        "\n"
-        "This will KEEP the pristine baseline (the untouched copy of the\n"
-        "original Speedy files), so the next boot can re-roll a DLL name\n"
-        "instantly. Your real OpenSpeedy install is NOT touched.\n"
-        "\n"
-        "Proceed with Rollback All?"
-    )
-
-    UNPATCH_PROMPT = (
-        "UNPATCH — full removal (zero footprint)\n"
-        "\n"
-        "This will:\n"
-        "  - close any running Speedy / bridge processes,\n"
-        "  - delete every temp sandbox folder this tool created,\n"
-        "  - delete the ENTIRE backups folder, INCLUDING the pristine\n"
-        "    baseline copy of the original Speedy files.\n"
-        "\n"
-        "Nothing this tool created will remain. The next boot must re-copy\n"
-        "a fresh pristine baseline from your live OpenSpeedy install first,\n"
-        "so that first boot is slightly slower. Your real OpenSpeedy install\n"
-        "is NOT touched.\n"
-        "\n"
-        "Proceed with full Unpatch?"
-    )
-
     def __init__(self, splash=None) -> None:
-        self._splash = splash or _NullSplash()
+        self.splash = splash or NullSplash()
 
-        self._splash.step("Loading configuration")
+        self.splash.step("Loading configuration")
         self.config = ConfigHolder()
         self.state = WatchState()
-        self.state.refresher_status = "Active" if self.config.refresher_enabled else "Disabled"
-        self.stop_event = threading.Event()
+        self.state.refresherStatus = "Active" if self.config.refresher_enabled else "Disabled"
+        self.stopEvent = threading.Event()
 
-        self._splash.step("Sweeping orphaned temp folders")
-        swept_count = stealth_temp.sweep_orphans()
-        log(f"[main] Startup orphan sweep removed {swept_count} stale temp folder(s).")
+        self.splash.step("Sweeping orphaned temp folders")
+        swept = stealth_temp.sweepOrphans()
+        logInfo(f"[main] Startup orphan sweep removed {swept} stale temp folder(s).")
 
-        self._splash.step("Preparing Speedy store and sandbox")
+        self.splash.step("Preparing Speedy store and sandbox")
         self.speedy = SpeedyDLLManager()
 
-        self._splash.step("Wiring boot and refresher")
+        self.splash.step("Wiring boot and refresher")
+        self.desktopExile = DesktopExile(
+            configProvider=lambda: self.config,
+            stopEvent=self.stopEvent,
+            ownPid=os.getpid(),
+        )
+        self.popupSuppressor = PopupSuppressor(
+            configProvider=lambda: self.config,
+            ownPid=os.getpid(),
+        )
         self.booter = GameBooter(
-            config_provider=lambda: self.config,
+            configProvider=lambda: self.config,
             state=self.state,
-            stop_event=self.stop_event,
-            speedy_manager=self.speedy,
+            stopEvent=self.stopEvent,
+            speedyManager=self.speedy,
+            desktopExile=self.desktopExile,
+            popupSuppressor=self.popupSuppressor,
         )
         self.refresher = Refresher(
-            config_provider=lambda: self.config,
+            configProvider=lambda: self.config,
             state=self.state,
-            stop_event=self.stop_event,
+            stopEvent=self.stopEvent,
             booter=self.booter,
-            reload_config=self.config.reload,
+            reloadConfig=self.config.reload,
         )
 
-        self._splash.step("Building tray icon")
+        self.splash.step("Building tray icon")
         self.icon = pystray.Icon(
-            TRAY_ICON_ID,
-            build_icon_image(),
-            TRAY_ICON_TOOLTIP,
-            menu=self._build_menu(),
+            "TBHWatcher",
+            buildIconImage(),
+            "TBH Watcher",
+            menu=self.buildMenu(),
         )
 
-    def _set_state(self, **fields) -> None:
-        self.state.set(**fields)
+    def setState(self, **fields) -> None:
+        self.state.setFields(**fields)
         try:
             self.icon.update_menu()
         except Exception:
             pass
 
-    def _snapshot(self) -> dict:
+    def snapshot(self) -> dict:
         return self.state.snapshot()
 
-    def _build_menu(self) -> pystray.Menu:
+    def buildMenu(self) -> pystray.Menu:
         return pystray.Menu(
-            pystray.MenuItem(lambda i: f"Current Task: {self._snapshot()['current_task']}", None, enabled=False),
-            pystray.MenuItem(lambda i: f"Is TBH on?: {self._snapshot()['tbh_state']}", None, enabled=False),
-            pystray.MenuItem(lambda i: f"Game status: {self._snapshot()['game_state']}", None, enabled=False),
-            pystray.MenuItem(lambda i: f"Refresher: {self._snapshot()['refresher_status']}", None, enabled=False),
-            pystray.MenuItem(lambda i: f"Speedy DLL: {self._snapshot()['dll_status']}", None, enabled=False),
-            pystray.MenuItem(lambda i: f"Last event: {self._snapshot()['last_event']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Current Task: {self.snapshot()['currentTask']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Is TBH on?: {self.snapshot()['tbhState']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Game status: {self.snapshot()['gameState']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Refresher: {self.snapshot()['refresherStatus']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Speedy DLL: {self.snapshot()['dllStatus']}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"Last event: {self.snapshot()['lastEvent']}", None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Enable Refresher", self._toggle_refresher,
-                             checked=lambda i: self.config.refresher_enabled),
-            pystray.MenuItem("Speedy Camouflage", self._build_speedy_menu()),
+            pystray.MenuItem("Enable Refresher", self.toggleRefresher,
+                             checked=lambda item: self.config.refresher_enabled),
+            pystray.MenuItem("Speedy Camouflage", self.buildSpeedyMenu()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Launch game now", self._launch_now),
-            pystray.MenuItem("Debug", self._build_debug_menu()),
-            pystray.MenuItem("Exit", self._exit),
+            pystray.MenuItem("Launch game now", self.launchNow),
+            pystray.MenuItem("Debug", self.buildDebugMenu()),
+            pystray.MenuItem("Exit", self.exit),
         )
 
-    def _build_debug_menu(self) -> pystray.Menu:
+    def buildDebugMenu(self) -> pystray.Menu:
         return pystray.Menu(
-            pystray.MenuItem("Emergency: Clear Leftover Windows", self._emergency_clear),
-            pystray.MenuItem("Run Diagnostics", self._run_diagnostics),
+            pystray.MenuItem("Emergency: Clear Leftover Windows", self.emergencyClear),
+            pystray.MenuItem("Debug: Refresh in 10s (current cycle)", self.forceRefreshSoon),
+            pystray.MenuItem("Run Diagnostics", self.runDiagnosticsAction),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Open Config File", self._open_config),
-            pystray.MenuItem("Open Log File", self._open_log),
-            pystray.MenuItem("Clear Log File", self._clear_log),
+            pystray.MenuItem("Open Config File", self.openConfig),
+            pystray.MenuItem("Open Log File", self.openLog),
+            pystray.MenuItem("Clear Log File", self.clearLog),
         )
 
-    def _build_speedy_menu(self) -> pystray.Menu:
-        dll_name_items = [
+    def buildSpeedyMenu(self) -> pystray.Menu:
+        dllItems = [
             pystray.MenuItem(
                 pair[0],
-                self._make_lock_dll_handler(pair[0], pair[1]),
-                checked=lambda i, name=pair[0]: self.speedy.active_64 == name,
+                self.makeChooseDll(pair[0], pair[1]),
+                checked=lambda item, name=pair[0]: self.speedy.active64 == name,
             )
-            for pair in CAMOUFLAGE_NAMES
+            for pair in camouflageNames
         ]
         return pystray.Menu(
-            pystray.MenuItem(lambda i: f"Active DLL: {self.speedy.active_64}", None, enabled=False),
-            pystray.MenuItem("Enable DLL Randomiser", self._toggle_reroller,
-                             checked=lambda i: self.config.dll_reroller_enabled),
-            pystray.MenuItem("Choose DLL Name", pystray.Menu(*dll_name_items)),
+            pystray.MenuItem(lambda item: f"Active DLL: {self.speedy.active64}", None, enabled=False),
+            pystray.MenuItem("Enable DLL Randomiser", self.toggleReroller,
+                             checked=lambda item: self.config.dll_reroller_enabled),
+            pystray.MenuItem("Choose DLL Name", pystray.Menu(*dllItems)),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Re-roll Now", self._reroll_now),
-            pystray.MenuItem("Rollback All", self._rollback_all),
-            pystray.MenuItem("Unpatch (remove backups)", self._unpatch),
+            pystray.MenuItem("Re-roll Now", self.rerollNow),
+            pystray.MenuItem("Rollback All", self.rollbackAll),
+            pystray.MenuItem("Unpatch (remove backups)", self.unpatch),
         )
 
-    def _toggle_refresher(self, icon, item):
-        new_value = not self.config.refresher_enabled
-        update_config_key("refresher_enabled", new_value)
+    def toggleRefresher(self, icon, item):
+        newValue = not self.config.refresher_enabled
+        updateConfigKey("refresher_enabled", newValue)
         self.config.reload(force=True)
-        log(f"[main] Refresher toggled to {new_value}.")
-        self._set_state(
-            refresher_status="Waiting for game" if new_value else "Disabled",
-            last_event=f"Refresher {'enabled' if new_value else 'disabled'}",
+        logInfo(f"[main] Refresher toggled to {newValue}.")
+        self.setState(
+            refresherStatus="Waiting for game" if newValue else "Disabled",
+            lastEvent=f"Refresher {'enabled' if newValue else 'disabled'}",
         )
 
-    def _toggle_reroller(self, icon, item):
-        new_value = not self.config.dll_reroller_enabled
-        update_config_key("dll_reroller_enabled", new_value)
+    def toggleReroller(self, icon, item):
+        newValue = not self.config.dll_reroller_enabled
+        updateConfigKey("dll_reroller_enabled", newValue)
         self.config.reload(force=True)
-        log(f"[main] DLL randomiser toggled to {new_value}.")
-        self._set_state(last_event=f"DLL randomiser {'enabled' if new_value else 'disabled'}")
+        logInfo(f"[main] DLL randomiser toggled to {newValue}.")
+        self.setState(lastEvent=f"DLL randomiser {'enabled' if newValue else 'disabled'}")
 
-    def _make_lock_dll_handler(self, dll_64: str, dll_32: str):
+    def makeChooseDll(self, dll64: str, dll32: str):
         def handler(icon, item):
-            log(f"[main] User locked camouflage to {dll_64}.")
-            update_config_key("dll_reroller_enabled", False)
+            logInfo(f"[main] User locked camouflage to {dll64}.")
+            updateConfigKey("dll_reroller_enabled", False)
             self.config.reload(force=True)
-            self._set_state(dll_status=f"Patching ({dll_64})...",
-                            last_event=f"Locking DLL to {dll_64}")
-            threading.Thread(target=self._build_camouflage, args=((dll_64, dll_32),), daemon=True).start()
+            self.setState(dllStatus=f"Patching ({dll64})...", lastEvent=f"Locking DLL to {dll64}")
+            threading.Thread(target=self.patchTo, args=((dll64, dll32),), daemon=True).start()
         return handler
 
-    def _build_camouflage(self, forced_names) -> None:
-        build = self.speedy.prepare(force_names=forced_names)
+    def patchTo(self, names) -> None:
+        build = self.speedy.prepare(forceNames=names)
         if build:
-            self._set_state(dll_status=f"Ready ({build.dll_64})",
-                            last_event=f"Camouflage built: {build.dll_64}")
+            self.setState(dllStatus=f"Ready ({build.dll64})", lastEvent=f"Camouflage built: {build.dll64}")
         else:
-            self._set_state(dll_status="Patch failed",
-                            last_event="Camouflage build failed (see log)")
+            self.setState(dllStatus="Patch failed", lastEvent="Camouflage build failed (see log)")
 
-    def _reroll_now(self, icon, item):
-        self._set_state(dll_status="Re-rolling...", last_event="Manual re-roll requested")
-        threading.Thread(target=self._build_camouflage, args=(None,), daemon=True).start()
+    def rerollNow(self, icon, item):
+        self.setState(dllStatus="Re-rolling...", lastEvent="Manual re-roll requested")
+        threading.Thread(target=self.patchTo, args=(None,), daemon=True).start()
 
-    def _rollback_all(self, icon, item):
-        if not confirm_dialog("Confirm Rollback All", self.ROLLBACK_PROMPT):
-            log("[main] Rollback All cancelled by user.")
-            self._set_state(last_event="Rollback cancelled")
+    def rollbackAll(self, icon, item):
+        if not confirmDialog("Confirm Rollback All", rollbackPrompt):
+            logInfo("[main] Rollback All cancelled by user.")
+            self.setState(lastEvent="Rollback cancelled")
             return
-        self._set_state(dll_status="Rolling back...", last_event="Rollback requested")
-        threading.Thread(target=self._do_rollback, daemon=True).start()
+        self.setState(dllStatus="Rolling back...", lastEvent="Rollback requested")
+        threading.Thread(target=self.doRollback, daemon=True).start()
 
-    def _do_rollback(self):
-        self.booter.close_speedy_and_helpers(timeout=QUICK_CLOSE_TIMEOUT_SECONDS)
-        self.speedy.rollback_all()
-        self._set_state(dll_status="Idle", last_event="Rollback complete")
+    def doRollback(self):
+        self.booter.closeSpeedyAndHelpers(timeout=2)
+        self.speedy.rollbackAll()
+        self.setState(dllStatus="Idle", lastEvent="Rollback complete")
 
-    def _unpatch(self, icon, item):
-        if not confirm_dialog("Confirm Unpatch", self.UNPATCH_PROMPT):
-            log("[main] Unpatch cancelled by user.")
-            self._set_state(last_event="Unpatch cancelled")
+    def unpatch(self, icon, item):
+        if not confirmDialog("Confirm Unpatch", unpatchPrompt):
+            logInfo("[main] Unpatch cancelled by user.")
+            self.setState(lastEvent="Unpatch cancelled")
             return
-        self._set_state(dll_status="Unpatching...", last_event="Unpatch requested")
-        threading.Thread(target=self._do_unpatch, daemon=True).start()
+        self.setState(dllStatus="Unpatching...", lastEvent="Unpatch requested")
+        threading.Thread(target=self.doUnpatch, daemon=True).start()
 
-    def _do_unpatch(self):
-        self.booter.close_speedy_and_helpers(timeout=QUICK_CLOSE_TIMEOUT_SECONDS)
+    def doUnpatch(self):
+        self.booter.closeSpeedyAndHelpers(timeout=2)
         self.speedy.unpatch()
-        self._set_state(dll_status="Unpatched", last_event="Unpatch complete")
+        self.setState(dllStatus="Unpatched", lastEvent="Unpatch complete")
 
-    def _launch_now(self, icon, item):
-        log("[main] Tray action: 'Launch game now' clicked.")
-        threading.Thread(target=self.booter.launch_game_flow, daemon=True).start()
+    def launchNow(self, icon, item):
+        logInfo("[main] Tray action: 'Launch game now' clicked.")
+        threading.Thread(target=self.booter.launchGameFlow, daemon=True).start()
 
-    def _run_diagnostics(self, icon, item):
-        log("[main] Tray action: 'Run Diagnostics' clicked.")
-        threading.Thread(target=self.run_diagnostics, daemon=True).start()
+    def runDiagnosticsAction(self, icon, item):
+        logInfo("[main] Tray action: 'Run Diagnostics' clicked.")
+        threading.Thread(target=self.runDiagnostics, daemon=True).start()
 
-    def _emergency_clear(self, icon, item):
-        log("[main] Tray action: 'Emergency: Clear Leftover Windows' clicked.")
-        self._set_state(last_event="Emergency window clear running...")
-        threading.Thread(target=self._do_emergency_clear, daemon=True).start()
-
-    def _do_emergency_clear(self):
-        summary = self.booter.emergency_window_clear()
-        self._set_state(
-            last_event=(f"Emergency clear: {summary['dir_windows_closed']} win, "
-                        f"{summary['procs_killed']} proc, "
-                        f"{summary['blank_windows_closed']} blank"))
-
-    def _open_config(self, icon, item):
+    def forceRefreshSoon(self, icon, item):
+        logInfo("[main] Tray action: 'Debug: Refresh in 10s' clicked.")
         try:
-            if not CONFIG_FILE.exists():
-                save_config(DEFAULT_CONFIG)
-            os.startfile(str(CONFIG_FILE))  # type: ignore[attr-defined]
+            ok, message = self.refresher.forceRefreshSoon(10.0)
         except Exception as error:
-            log(f"[main] Failed to open config: {error}")
+            ok, message = False, str(error)
+        self.setState(lastEvent=f"Debug refresh-in-10s: {message}")
+        logInfo(f"[main] Debug refresh-in-10s -> {'OK' if ok else 'declined'}: {message}")
 
-    def _open_log(self, icon, item):
+    def emergencyClear(self, icon, item):
+        logInfo("[main] Tray action: 'Emergency: Clear Leftover Windows' clicked.")
+        self.setState(lastEvent="Emergency window clear running...")
+        threading.Thread(target=self.doEmergencyClear, daemon=True).start()
+
+    def doEmergencyClear(self):
+        summary = self.booter.emergencyWindowClear()
+        self.setState(lastEvent=(f"Emergency clear: {summary['dir_windows_closed']} win, "
+                                 f"{summary['procs_killed']} proc, "
+                                 f"{summary['blank_windows_closed']} blank"))
+
+    def openConfig(self, icon, item):
         try:
-            if LOG_FILE.exists():
-                os.startfile(str(LOG_FILE))  # type: ignore[attr-defined]
+            if not configFile.exists():
+                saveConfig(defaultConfig)
+            os.startfile(str(configFile))
+        except Exception as error:
+            logInfo(f"[main] Failed to open config: {error}")
+
+    def openLog(self, icon, item):
+        try:
+            if logFile.exists():
+                os.startfile(str(logFile))
             else:
-                log("[main] Open log: file does not exist yet.")
+                logInfo("[main] Open log: file does not exist yet.")
         except Exception as error:
-            log(f"[main] Failed to open log: {error}")
+            logInfo(f"[main] Failed to open log: {error}")
 
-    def _clear_log(self, icon, item):
+    def clearLog(self, icon, item):
         try:
-            open(LOG_FILE, "w", encoding="utf-8").close()
-            log("[main] Log cleared via tray.")
-            self._set_state(last_event="Log file cleared")
+            open(logFile, "w", encoding="utf-8").close()
+            logInfo("[main] Log cleared via tray.")
+            self.setState(lastEvent="Log file cleared")
         except Exception as error:
-            log(f"[main] Failed to clear log: {error}")
+            logInfo(f"[main] Failed to clear log: {error}")
 
-    def _exit(self, icon, item):
-        self._set_state(current_task="Exiting", running=False, last_event="Shutting down")
-        self.stop_event.set()
+    def exit(self, icon, item):
+        self.setState(currentTask="Exiting", running=False, lastEvent="Shutting down")
+        self.stopEvent.set()
         try:
-            self.speedy.cleanup_session()
+            self.popupSuppressor.stop()
         except Exception:
             pass
         try:
-            stealth_temp.cleanup_session()
+            self.desktopExile.cleanup()
+        except Exception:
+            pass
+        try:
+            self.speedy.cleanupSession()
+        except Exception:
+            pass
+        try:
+            stealth_temp.cleanupSession()
         except Exception:
             pass
         try:
             icon.stop()
         except Exception as error:
-            log(f"[main] Tray stop failed: {error}")
+            logInfo(f"[main] Tray stop failed: {error}")
 
-    def run_diagnostics(self) -> None:
+    def runDiagnostics(self) -> None:
         import watcher_config
-        import splash as splash_module
 
-        log("==================== TBH WATCHER DIAGNOSTICS ====================")
-        self._set_state(last_event="Diagnostics: running...")
+        logInfo("==================== TBH WATCHER DIAGNOSTICS ====================")
+        self.setState(lastEvent="Diagnostics: running...")
 
         def report(component, status, detail):
-            log(f"[DIAG] [{status:4}] {component:26} {detail}")
+            logInfo(f"[DIAG] [{status:4}] {component:26} {detail}")
 
-        all_problems: list[str] = []
-        all_problems += watcher_config.diagnose(report)
-        all_problems += stealth_temp.diagnose(report)
-        all_problems += dll_mutate.diagnose(report)
-        all_problems += splash_module.diagnose(report)
-        all_problems += self.speedy.diagnose(report)
-        all_problems += self.booter.diagnose(report)
-        all_problems += self.refresher.diagnose(report)
+        import splash as splashModule
+        allIssues: list[str] = []
+        allIssues += watcher_config.diagnose(report)
+        allIssues += stealth_temp.diagnose(report)
+        allIssues += dll_mutate.diagnose(report)
+        allIssues += splashModule.diagnose(report)
+        allIssues += self.speedy.diagnose(report)
+        allIssues += self.booter.diagnose(report)
+        allIssues += self.refresher.diagnose(report)
 
-        log("================================================================")
-        if all_problems:
-            log(f"[DIAG] Completed with {len(all_problems)} issue(s): {all_problems}")
-            self._set_state(last_event=f"Diagnostics: {len(all_problems)} issue(s) (see log)")
+        logInfo("================================================================")
+        if allIssues:
+            logInfo(f"[DIAG] Completed with {len(allIssues)} issue(s): {allIssues}")
+            self.setState(lastEvent=f"Diagnostics: {len(allIssues)} issue(s) (see log)")
         else:
-            log("[DIAG] Completed: all systems healthy.")
-            self._set_state(last_event="Diagnostics: all OK")
+            logInfo("[DIAG] Completed: all systems healthy.")
+            self.setState(lastEvent="Diagnostics: all OK")
 
-    def monitor_loop(self) -> None:
-        self._set_state(current_task="Monitoring TBH", tbh_state="No",
-                        game_state="Unknown", last_event="Watcher started")
-        while not self.stop_event.is_set():
+    def monitorLoop(self) -> None:
+        self.setState(currentTask="Monitoring TBH", tbhState="No",
+                      gameState="Unknown", lastEvent="Watcher started")
+        while not self.stopEvent.is_set():
             try:
                 self.config.reload()
 
@@ -387,71 +405,73 @@ class TBHWatcher:
                     time.sleep(self.config.poll_interval_seconds)
                     continue
 
-                if not self.booter.is_game_running():
-                    self._set_state(tbh_state="No", game_state="Closed", current_task="Monitoring TBH")
+                if not self.booter.isGameRunning():
+                    self.setState(tbhState="No", gameState="Closed", currentTask="Monitoring TBH")
                     time.sleep(self.config.poll_interval_seconds)
                     continue
 
-                if self.booter.is_game_hung():
+                if self.booter.isGameHung():
                     time.sleep(self.config.hang_confirm_seconds)
                     if self.booter.busy:
                         pass
-                    elif self.booter.is_game_hung():
-                        self.booter.handle_hang()
+                    elif self.booter.isGameHung():
+                        self.booter.handleHang()
                     else:
-                        self._set_state(tbh_state="Yes", game_state="Open",
-                                        current_task="Monitoring TBH",
-                                        last_event="Temporary stall cleared")
+                        self.setState(tbhState="Yes", gameState="Open",
+                                      currentTask="Monitoring TBH",
+                                      lastEvent="Temporary stall cleared")
                 else:
-                    self._set_state(tbh_state="Yes", game_state="Open", current_task="Monitoring TBH")
+                    self.setState(tbhState="Yes", gameState="Open", currentTask="Monitoring TBH")
             except Exception as error:
-                log_error("Monitor loop error", exc=error, where="main.monitor_loop")
-                self._set_state(last_event="Error in monitor loop")
+                logError("Monitor loop error", error=error, where="main.monitorLoop")
+                self.setState(lastEvent="Error in monitor loop")
             time.sleep(self.config.poll_interval_seconds)
 
     def run(self) -> None:
-        log("[main] TBH Watcher started.")
-        threading.Thread(target=self.monitor_loop, daemon=True).start()
+        logInfo("[main] TBH Watcher started.")
+        threading.Thread(target=self.monitorLoop, daemon=True).start()
         threading.Thread(target=self.refresher.run, daemon=True).start()
 
-        def show_ready_notification():
+        def announceReady():
             try:
-                self._splash.notify_ready(self.icon)
+                self.splash.notifyReady(self.icon)
             except Exception:
                 pass
-        threading.Timer(READY_NOTIFICATION_DELAY_SECONDS, show_ready_notification).start()
+        timer = threading.Timer(1.5, announceReady)
+        timer.daemon = True
+        timer.start()
         self.icon.run()
 
 
 def main() -> None:
-    install_global_excepthook()
-    log("[main] === Boot start ===")
+    installGlobalExceptHook()
+    logInfo("[main] === Boot start ===")
 
-    if not acquire_single_instance():
-        log("[main] Another instance is already running; exiting this one.")
-        warn_already_running()
+    if not acquireSingleInstance():
+        logInfo("[main] Another instance is already running; exiting this one.")
+        warnAlreadyRunning()
         return
 
-    splash = _NullSplash()
+    splash = NullSplash()
     try:
-        if load_config().get("splash_enabled", True):
-            splash = Splash(total_phases=STARTUP_PHASE_COUNT)
+        if loadConfig().get("splash_enabled", True):
+            splash = Splash(totalSteps=6)
             splash.start()
         else:
-            log("[main] Splash disabled via config; logging phases only.")
+            logInfo("[main] Splash disabled via config; logging phases only.")
     except Exception as error:
-        log_error("Splash failed to start (continuing without it)", exc=error, where="main")
-        splash = _NullSplash()
+        logError("Splash failed to start (continuing without it)", error=error, where="main")
+        splash = NullSplash()
 
-    app = None
+    application = None
     try:
-        app = TBHWatcher(splash=splash)
+        application = TBHWatcher(splash=splash)
         try:
             splash.step("Starting watcher")
         except Exception:
             pass
     except Exception as error:
-        log_error("FATAL: watcher failed to start", exc=error, where="main.startup")
+        logError("FATAL: watcher failed to start", error=error, where="main.startup")
         try:
             splash.finish()
         except Exception:
@@ -463,11 +483,11 @@ def main() -> None:
         except Exception:
             pass
 
-    log("[main] === Boot complete; entering tray loop ===")
+    logInfo("[main] === Boot complete; entering tray loop ===")
     try:
-        app.run()
+        application.run()
     except Exception as error:
-        log_error("FATAL: tray loop crashed", exc=error, where="main.run")
+        logError("FATAL: tray loop crashed", error=error, where="main.run")
         raise
 
 
