@@ -7,6 +7,16 @@ launch popping into your face or stealing what you're typing.
 
 It runs in the system tray (no window), survives unattended sessions, and is built so
 that any single feature failing never takes the whole tool down.
+---
+
+## Requirements
+
+### OpenSpeedy
+```winget install openspeedy```
+https://github.com/game1024/OpenSpeedy/
+
+### Sandboxie (Optional)
+https://github.com/sandboxie-plus/sandboxie
 
 ---
 
@@ -41,6 +51,24 @@ that any single feature failing never takes the whole tool down.
 ---
 
 ## Changelog
+
+### 3.7.0 — Adjust to be able to run a second copy inside Sandboxie
+
+- You can now run **two independent game + watcher pairs at once**: one normally on your
+  PC, and a second one inside a Sandboxie box. Each watcher minds only its own game and
+  Speedy — the boxed watcher won't touch your host game, and vice versa.
+- The watcher **detects when it's running in Sandboxie** and labels itself **"TBH Watcher (SB)"**
+  in the tray, with a matching marker in the Debug menu, so you can tell the two apart at a glance.
+- Each instance starts independently — running a copy in the box no longer blocks the normal one
+  (or the other way around).
+- **Focus return is skipped inside the box** (Sandboxie keeps boxed apps from reaching across to
+  your normal windows, so it can't reliably hand focus back anyway), but the game still boots onto
+  the hidden desktop and comes back minimised as usual.
+- Known limitation: inside Sandboxie the **tray icon may not appear** (Sandboxie can block the
+  icon from registering with Windows). The watcher still runs and does its job, but to get the
+  tray icon back you may need a recent Sandboxie-Plus and to allow tray-icon/window access for the
+  box (e.g. `UseShellNotifyIconProxy=y` + `OpenWinClass=*`, or set the box to Application
+  Compartment mode).
 
 ### 3.6.2 — Auto-revive when the game crashes
 - If Task Bar Hero closes unexpectedly (a real crash/close — not a scheduled refresh and not a
